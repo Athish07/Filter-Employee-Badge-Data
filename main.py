@@ -1,9 +1,10 @@
 import sys
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict
 import pandas as pd
 
-DATA_FILE = Path("data") / "EY Badges Tracker.xlsx"
+BADGES_FILE = Path("data") / "EY Badges Tracker.xlsx"
+EMAIL_MASTER_FILE = Path("data") / "Emerging Tech Team - FY 26.xlsx"
 
 ALLOWED_STATUS = [
     "In Progress", "Completed", "Not Started", "Submitted", "Rejected"
@@ -17,26 +18,38 @@ ALLOWED_CYCLES = [
 ]
 
 DEFAULT_COLUMNS = {
-    "gpn_id": "GPN",            
-    "name": "Name",               
-    "status": "Status",            
+    "gpn_id": "GPN",                
+    "name": "Name",                  
+    "status": "Status",              
     "cycle": "Completion-Cycle",
 }
 
-
-def normalize_series(s: pd.Series) -> pd.Series:
+def clean_series(s: pd.Series) -> pd.Series:
     
     return (
         s.astype(str)
+         .str.replace("\u00A0", " ", regex=False)  
+         .str.replace("\u200B", "", regex=False)   
          .str.strip()
          .replace({"nan": ""})
          .str.replace(r"\s+", " ", regex=True)
          .str.casefold()
     )
+    
 
 def coalesce_columns(df: pd.DataFrame, primary: str, alternates: List[str]) -> str:
-     
+    
+    
+    def hdr_clean(x: str) -> str:
+        return (
+            str(x)
+            .replace("\u00A0", " ")  # NBSP -> space
+            .replace("\u200B", "")   # zero-width
+            .strip()
+        )
+
     def norm(x: str) -> str:
+        x = hdr_clean(x)
         return x.strip().lower().replace("-", " ").replace("_", " ")
     
     norm_map = {norm(c): c for c in df.columns}
@@ -44,27 +57,65 @@ def coalesce_columns(df: pd.DataFrame, primary: str, alternates: List[str]) -> s
     for cand in [primary] + alternates:
         if norm(cand) in norm_map:
             return norm_map[norm(cand)]
-        raise KeyError(f"Column not found. Tried { [primary] + alternates }. Available: {list(df.columns)}")
+        
+    raise KeyError(f"Column not found. Tried { [primary] + alternates }. Available: {list(df.columns)}")
 
-def compute_exceptional_cases(df: pd.DataFrame, col_gpn: str, col_name: str, col_status: str, col_cycle: str) -> pd.DataFrame:
-    
-    status_norm = normalize_series(df[col_status].fillna(""))
-    cycle_norm = normalize_series(df[col_cycle].fillna(""))
+import re
+import pandas as pd
+from pathlib import Path
 
-    gpn = df[col_gpn].astype(str).str.strip()
-    name = df[col_name].astype(str).str.strip()
+def load_excel_with_header_detection(path: Path) -> pd.DataFrame:
+    """
+    Detect the header row by scanning the first 20 rows for one that contains both 'GPN' and 'Email ID',
+    then read the sheet using that row as header. Clean headers and drop Unnamed:* columns.
+    """
+    # Peek first 20 rows without headers
+    peek = pd.read_excel(path, header=None, nrows=20, engine="openpyxl", dtype=str)
+
+    header_row = None
+    for i in range(len(peek)):
+        row_vals = (
+            peek.iloc[i]
+            .astype(str)
+            .str.replace("\u00A0", " ", regex=False)  # NBSP -> space
+            .str.replace("\u200B", "", regex=False)   # zero-width
+            .str.strip()
+        ).tolist()
+        if ("GPN" in row_vals) and ("Email ID" in row_vals):
+            header_row = i
+            break
+
+    if header_row is None:
+        raise RuntimeError(
+            f"Could not find a header row containing both 'GPN' and 'Email ID' in: {path}"
+        )
+    df = pd.read_excel(path, header=header_row, engine="openpyxl", dtype=str)
     
-    status_blank   = status_norm.eq("")
-    cycle_blank    = cycle_norm.eq("")
-    
+    def clean_hdr(x: str) -> str:
+        x = str(x).replace("\u00A0", " ").replace("\u200B", "")
+        x = re.sub(r"\s+", " ", x).strip()
+        return x
+
+    df.columns = [clean_hdr(c) for c in df.columns]    
+    return df
+
+def compute_exceptions(df: pd.DataFrame, col_gpn: str, col_name: str, col_status: str, col_cycle: str) -> pd.DataFrame:
+    status_norm = clean_series(df[col_status].fillna(""))
+    cycle_norm  = clean_series(df[col_cycle].fillna(""))
+
+    gpn  = clean_series(df[col_gpn])
+    name = clean_series(df[col_name])
+
+    status_blank = status_norm.eq("")
+    cycle_blank  = cycle_norm.eq("")
     status_allowed = {x.casefold() for x in ALLOWED_STATUS}
     cycle_allowed  = {x.casefold() for x in ALLOWED_CYCLES}
-    
-    status_invalid = (~status_blank) & (~normalize_series(df[col_status]).isin(status_allowed))
-    cycle_invalid  = (~cycle_blank) & (~normalize_series(df[col_cycle]).isin(cycle_allowed))
-    gpn_blank      = gpn.eq("") | gpn.eq("nan")
-    name_blank     = name.eq("") | name.eq("nan")
-    
+
+    status_invalid = (~status_blank) & (~status_norm.isin(status_allowed))
+    cycle_invalid  = (~cycle_blank)  & (~cycle_norm.isin(cycle_allowed))
+    gpn_blank      = gpn.eq("")
+    name_blank     = name.eq("")
+
     reasons = []
     for i in range(len(df)):
         r = []
@@ -72,25 +123,23 @@ def compute_exceptional_cases(df: pd.DataFrame, col_gpn: str, col_name: str, col
         if bool(status_invalid.iat[i]): r.append("Invalid Status")
         if bool(cycle_blank.iat[i]):    r.append("Blank Completion-Cycle")
         if bool(cycle_invalid.iat[i]):  r.append("Invalid Completion-Cycle")
-        if bool(gpn_blank.iat[i]):      r.append("Blank GPN ID")
+        if bool(gpn_blank.iat[i]):      r.append("Blank GPN")
         if bool(name_blank.iat[i]):     r.append("Blank Name")
         reasons.append(", ".join(r))
-        
+
     out = df.copy()
     out["ExceptionReason"] = reasons
     return out[out["ExceptionReason"] != ""].copy()
 
 def prompt_multi_select(title: str, options: List[str]) -> List[str]:
-    
     print(f"\n{title}")
     for i, opt in enumerate(options, 1):
         print(f"  {i}. {opt}")
-    print("Enter numbers separated by comma (e.g., 1,3) or  'all' for all-options or press Enter to skip.")
+    print("Enter numbers separated by comma (e.g., 1,3) — 'all' for all — or press Enter to skip.")
     while True:
         s = input("> ").strip()
         if s == "":
             return []
-        
         if s.lower() in ("all", "a", "*"):
             return options[:]
         try:
@@ -102,54 +151,86 @@ def prompt_multi_select(title: str, options: List[str]) -> List[str]:
                     if p not in seen:
                         seen.add(p); out.append(p)
                 return out
+            print("No valid selections parsed. Try again.")
         except Exception:
             print("Invalid input. Try again (e.g., 1,2 or 'all' or Enter to skip).")
 
 def apply_filters(df: pd.DataFrame, col_status: str, col_cycle: str, sel_status: List[str], sel_cycle: List[str]) -> pd.DataFrame:
-    
-    s_norm = normalize_series(df[col_status].fillna(""))
-    c_norm = normalize_series(df[col_cycle].fillna(""))
-    sel_s = set(x.casefold() for x in sel_status) if sel_status else None
-    sel_c = set(x.casefold() for x in sel_cycle) if sel_cycle else None
+    s_norm = clean_series(df[col_status].fillna(""))
+    c_norm = clean_series(df[col_cycle].fillna(""))
+    sel_s  = set(x.casefold() for x in sel_status) if sel_status else None
+    sel_c  = set(x.casefold() for x in sel_cycle)  if sel_cycle  else None
     mask = pd.Series(True, index=df.index)
-    
     if sel_s is not None:
         mask &= s_norm.isin(sel_s)
     if sel_c is not None:
         mask &= c_norm.isin(sel_c)
-        
     return df[mask].copy()
 
-def main():
+def build_unique_gpn(df: pd.DataFrame, col_gpn: str, col_name: str) -> pd.DataFrame:
+    out = (
+        df[[col_gpn, col_name]]
+        .assign(
+            **{
+                col_gpn: clean_series(df[col_gpn]),
+                col_name: clean_series(df[col_name]),
+            }
+        )
+        .dropna(subset=[col_gpn])
+        .sort_values([col_gpn, col_name], kind="stable")
+        .drop_duplicates(subset=[col_gpn], keep="first")
+        .reset_index(drop=True)
+    )
+    return out
+
+def build_gpn_to_email_map(master_path: Path) -> Dict[str, str]:
     
-    if not DATA_FILE.exists():
-        print(f"ERROR: Expected file not found: {DATA_FILE.resolve()}")
+    dfm = load_excel(master_path)
+
+    col_gpn   = coalesce_columns(dfm, "GPN", ["GPN ID", "Gpn", "GPN_Id", "GPN Id"])
+    col_email = coalesce_columns(dfm, "Email ID", ["EmailID", "Email", "Email Address", "Mail", "E-mail ID"])
+
+    dfm["_GPN_norm"]  = clean_series(dfm[col_gpn])
+    dfm["_EMAIL_raw"] = clean_series(dfm[col_email])
+    dfm = dfm[dfm["_GPN_norm"] != ""].copy()
+
+    dfm_sorted = dfm.assign(_email_blank=dfm["_EMAIL_raw"].eq("")).sort_values(["_GPN_norm", "_email_blank"])
+    dedup = dfm_sorted.drop_duplicates(subset=["_GPN_norm"], keep="first")
+
+    return dict(zip(dedup["_GPN_norm"], dedup["_EMAIL_raw"]))
+
+def perform_action_with_email(email: str, gpn: str, name: str) -> None:
+    print(f"[ACTION] Using email '{email}' for GPN '{gpn}' (Name: {name})")
+    
+def main() -> None:
+    if not BADGES_FILE.exists():
+        print(f"ERROR: Expected file not found: {BADGES_FILE.resolve()}")
         print("Place your latest 'EY Badges Tracker.xlsx' under the 'data/' folder and re-run.")
         sys.exit(1)
-        
-    try:
-        df:pd.DataFrame = pd.read_excel(DATA_FILE, dtype=str, engine="openpyxl")
-    except Exception as e:
-        print(f"ERROR: Failed to read Excel: {e}", file=sys.stderr)
+    if not EMAIL_MASTER_FILE.exists():
+        print(f"ERROR: Email master not found: {EMAIL_MASTER_FILE.resolve()}")
+        print("Place your 'Emerging Tech Team - FY 26.xlsx' under the 'data/' folder and re-run.")
         sys.exit(1)
         
+    df = load_excel(BADGES_FILE)
+    
     try:
-        col_gpn    = coalesce_columns(df, DEFAULT_COLUMNS["gpn_id"],    ["GPNID", "GPN Id", "GPN_Id"])
-        col_name   = coalesce_columns(df, DEFAULT_COLUMNS["name"],      ["Employee Name", "Full Name"])
-        col_status = coalesce_columns(df, DEFAULT_COLUMNS["status"],    ["Status"])
-        col_cycle  = coalesce_columns(df, DEFAULT_COLUMNS["cycle"],     ["Completion Cycle", "CompletionCycle"])
+        col_gpn    = coalesce_columns(df, DEFAULT_COLUMNS["gpn_id"], ["GPNID", "GPN Id", "GPN_Id", "GPN ID"])
+        col_name   = coalesce_columns(df, DEFAULT_COLUMNS["name"],   ["Employee Name", "Full Name"])
+        col_status = coalesce_columns(df, DEFAULT_COLUMNS["status"], ["Status"])
+        col_cycle  = coalesce_columns(df, DEFAULT_COLUMNS["cycle"],  ["Completion Cycle", "CompletionCycle"])
     except KeyError as e:
         print(f"ERROR: {e}", file=sys.stderr); sys.exit(1)
         
-    exceptions = compute_exceptional_cases(df, col_gpn, col_name, col_status, col_cycle)
-    
+    exceptions = compute_exceptions(df, col_gpn, col_name, col_status, col_cycle)
     if exceptions.empty:
         print("All good, there is no issue with data.")
     else:
-        print("\n")
-        for i in range(len(exceptions)):
-            print(exceptions[col_gpn].iat[i] + "\t" + exceptions["ExceptionReason"].iat[i])
-            
+        print("\n===== Exceptions (basic) =====")
+        for _, r in exceptions[[col_gpn, "ExceptionReason"]].head(100).iterrows():
+            gpn_val = "" if pd.isna(r[col_gpn]) else str(r[col_gpn]).strip()
+            reason  = "" if pd.isna(r["ExceptionReason"]) else str(r["ExceptionReason"]).strip()
+            print(f"{gpn_val}\t{reason}")
         print("\n(Consider cleaning these before filtering.)")
         
     sel_status = prompt_multi_select("Select one or more Status options:", ALLOWED_STATUS)
@@ -158,32 +239,44 @@ def main():
     print("\nSelections:")
     print(f"  Status: {sel_status if sel_status else '(no filter)'}")
     print(f"  Completion-Cycle: {sel_cycle if sel_cycle else '(no filter)'}")
-    
+
     filtered = apply_filters(df, col_status, col_cycle, sel_status, sel_cycle)
     
-    output_by_gpn = (
-        filtered[[col_gpn, col_name]]
-        .assign(
-            **{
-                col_gpn: filtered[col_gpn].astype(str).str.strip(),
-                col_name: filtered[col_name].astype(str).str.strip(),
-            }
-        )
-        .dropna(subset=[col_gpn])
-        .sort_values([col_gpn, col_name], kind="stable")
-        .drop_duplicates(subset=[col_gpn], keep="first")
-        .reset_index(drop=True)
-    )
-    
+    output_by_gpn = build_unique_gpn(filtered, col_gpn, col_name)
+
     print("\n===== Filtered Output (unique by GPN) =====")
-    
     if output_by_gpn.empty:
         print("No rows matched your selections.")
+        sys.exit(0)
     else:
         print(f"Unique GPNs: {len(output_by_gpn)}\n")
-        
+        print(f"{col_gpn}\t{col_name}")
+        print("-" * (len(col_gpn) + 1 + len(col_name)))
         for _, row in output_by_gpn.iterrows():
             print(f"{row[col_gpn]}\t{row[col_name]}")
-                
+            
+    gpn_to_email = build_gpn_to_email_map(EMAIL_MASTER_FILE)
+
+    print("\n===== GPN → Email =====")
+    print(f"{col_gpn}\t{col_name}\tEmail ID")
+    print("-" * (len(col_gpn) + len(col_name) + len("Email ID") + 2))
+
+    missing_gpns: List[str] = []
+    for _, r in output_by_gpn.iterrows():
+        gpn_val  = str(r[col_gpn]).strip()
+        name_val = str(r[col_name]).strip()
+        email    = gpn_to_email.get(gpn_val.casefold(), "")
+        print(f"{gpn_val}\t{name_val}\t{email}")
+        if email == "":
+            missing_gpns.append(gpn_val)
+        else:
+            
+            perform_action_with_email(email, gpn_val, name_val)
+
+    if missing_gpns:
+        print("\n-- Missing emails for these GPNs (not found or blank in master) --")
+        for g in missing_gpns:
+            print(g)
+
 if __name__ == "__main__":
     main()
