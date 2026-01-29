@@ -128,7 +128,7 @@ def main():
         sys.exit(1)
         
     try:
-        df = pd.read_excel(DATA_FILE, dtype=str, engine="openpyxl")
+        df:pd.DataFrame = pd.read_excel(DATA_FILE, dtype=str, engine="openpyxl")
     except Exception as e:
         print(f"ERROR: Failed to read Excel: {e}", file=sys.stderr)
         sys.exit(1)
@@ -146,11 +146,7 @@ def main():
     if exceptions.empty:
         print("All good, there is no issue with data.")
     else:
-        
-        header = col_gpn + "\t" + "ExceptionReason"
-        print(header)
-        print("---" * len(header))
-        
+        print("\n")
         for i in range(len(exceptions)):
             print(exceptions[col_gpn].iat[i] + "\t" + exceptions["ExceptionReason"].iat[i])
             
