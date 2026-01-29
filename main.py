@@ -174,7 +174,7 @@ def build_gpn_to_email_map(master_path: Path) -> Dict[str, str]:
     return dict(zip(dedup["_GPN_norm"], dedup["_EMAIL_raw"]))
 
 def perform_action_with_email(email: str, gpn: str, name: str) -> None:
-    print(f"[ACTION] Using email '{email}' for GPN '{gpn}' (Name: {name})")
+    pass
     
 def main() -> None:
     if not BADGES_FILE.exists():
@@ -200,7 +200,7 @@ def main() -> None:
     if exceptions.empty:
         print("All good, there is no issue with data.")
     else:
-        print("\n===== Exceptions (basic) =====")
+        print("\n===== Exceptional-Cases =====")
         for _, r in exceptions[[col_gpn, "ExceptionReason"]].head(100).iterrows():
             gpn_val = "" if pd.isna(r[col_gpn]) else str(r[col_gpn]).strip()
             reason  = "" if pd.isna(r["ExceptionReason"]) else str(r["ExceptionReason"]).strip()
@@ -224,7 +224,6 @@ def main() -> None:
         sys.exit(0)
     else:
         print(f"Unique GPNs: {len(output_by_gpn)}\n")
-        print(f"{col_gpn}\t{col_name}")
         print("-" * (len(col_gpn) + 1 + len(col_name)))
         for _, row in output_by_gpn.iterrows():
             print(f"{row[col_gpn]}\t{row[col_name]}")
@@ -232,21 +231,21 @@ def main() -> None:
     gpn_to_email = build_gpn_to_email_map(EMAIL_MASTER_FILE)
 
     print("\n===== GPN → Email =====")
-    print(f"{col_gpn}\t{col_name}\tEmail ID")
-    print("-" * (len(col_gpn) + len(col_name) + len("Email ID") + 2))
-
     missing_gpns: List[str] = []
+    
     for _, r in output_by_gpn.iterrows():
         gpn_val  = str(r[col_gpn]).strip()
         name_val = str(r[col_name]).strip()
         email    = gpn_to_email.get(gpn_val.casefold(), "")
-        print(f"{gpn_val}\t{name_val}\t{email}")
+        
         if email == "":
             missing_gpns.append(gpn_val)
         else:
-            
+            print(f"{gpn_val}\t{name_val}\t{email}")
             perform_action_with_email(email, gpn_val, name_val)
-
+    
+    print("\n")
+    
     if missing_gpns:
         print("\n-- Missing emails for these GPNs (not found or blank in master) --")
         for g in missing_gpns:
