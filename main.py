@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 from typing import List, Dict
 import pandas as pd
+import re
 
 BADGES_FILE = Path("data") / "EY Badges Tracker.xlsx"
 EMAIL_MASTER_FILE = Path("data") / "Emerging Tech Team - FY 26.xlsx"
@@ -60,45 +61,12 @@ def coalesce_columns(df: pd.DataFrame, primary: str, alternates: List[str]) -> s
         
     raise KeyError(f"Column not found. Tried { [primary] + alternates }. Available: {list(df.columns)}")
 
-import re
-import pandas as pd
-from pathlib import Path
+def load_excel(path: Path) -> pd.DataFrame:
+    return pd.read_excel(path, dtype=str, engine="openpyxl")
 
-def load_excel_with_header_detection(path: Path) -> pd.DataFrame:
-    """
-    Detect the header row by scanning the first 20 rows for one that contains both 'GPN' and 'Email ID',
-    then read the sheet using that row as header. Clean headers and drop Unnamed:* columns.
-    """
-    # Peek first 20 rows without headers
-    peek = pd.read_excel(path, header=None, nrows=20, engine="openpyxl", dtype=str)
-
-    header_row = None
-    for i in range(len(peek)):
-        row_vals = (
-            peek.iloc[i]
-            .astype(str)
-            .str.replace("\u00A0", " ", regex=False)  # NBSP -> space
-            .str.replace("\u200B", "", regex=False)   # zero-width
-            .str.strip()
-        ).tolist()
-        if ("GPN" in row_vals) and ("Email ID" in row_vals):
-            header_row = i
-            break
-
-    if header_row is None:
-        raise RuntimeError(
-            f"Could not find a header row containing both 'GPN' and 'Email ID' in: {path}"
-        )
-    df = pd.read_excel(path, header=header_row, engine="openpyxl", dtype=str)
-    
-    def clean_hdr(x: str) -> str:
-        x = str(x).replace("\u00A0", " ").replace("\u200B", "")
-        x = re.sub(r"\s+", " ", x).strip()
-        return x
-
-    df.columns = [clean_hdr(c) for c in df.columns]    
-    return df
-
+def load_excel_first_sheet(path: Path) -> pd.DataFrame:
+    return pd.read_excel(path, sheet_name= "Emerging Tech Team Members", dtype= str, engine= "openpyxl")
+                
 def compute_exceptions(df: pd.DataFrame, col_gpn: str, col_name: str, col_status: str, col_cycle: str) -> pd.DataFrame:
     status_norm = clean_series(df[col_status].fillna(""))
     cycle_norm  = clean_series(df[col_cycle].fillna(""))
@@ -185,13 +153,19 @@ def build_unique_gpn(df: pd.DataFrame, col_gpn: str, col_name: str) -> pd.DataFr
 
 def build_gpn_to_email_map(master_path: Path) -> Dict[str, str]:
     
-    dfm = load_excel(master_path)
+    dfm = load_excel_first_sheet(master_path)
 
     col_gpn   = coalesce_columns(dfm, "GPN", ["GPN ID", "Gpn", "GPN_Id", "GPN Id"])
     col_email = coalesce_columns(dfm, "Email ID", ["EmailID", "Email", "Email Address", "Mail", "E-mail ID"])
 
     dfm["_GPN_norm"]  = clean_series(dfm[col_gpn])
-    dfm["_EMAIL_raw"] = clean_series(dfm[col_email])
+    dfm["_EMAIL_raw"] = (
+        dfm[col_email].astype(str)
+        .str.replace("\u00A0", " ", regex=False)
+        .str.replace("\u200B", "", regex=False)
+        .str.strip()
+        .str.replace(r"\s+", " ", regex=True)
+    )
     dfm = dfm[dfm["_GPN_norm"] != ""].copy()
 
     dfm_sorted = dfm.assign(_email_blank=dfm["_EMAIL_raw"].eq("")).sort_values(["_GPN_norm", "_email_blank"])
