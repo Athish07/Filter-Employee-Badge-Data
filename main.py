@@ -2,7 +2,9 @@ import sys
 from pathlib import Path
 from typing import List, Dict
 import pandas as pd
-import re
+import win32com.client as win32
+from time import sleep
+
 
 BADGES_FILE = Path("data") / "EY Badges Tracker.xlsx"
 EMAIL_MASTER_FILE = Path("data") / "Emerging Tech Team - FY 26.xlsx"
@@ -173,8 +175,17 @@ def build_gpn_to_email_map(master_path: Path) -> Dict[str, str]:
 
     return dict(zip(dedup["_GPN_norm"], dedup["_EMAIL_raw"]))
 
-def perform_action_with_email(email: str, gpn: str, name: str) -> None:
+def perform_action_with_emails(emails:List[str]) -> None:
     pass
+    
+    # to_field = "; ".join(emails)
+    # outlook = win32.Dispatch('Outlook.Application')
+    # mail = outlook.CreateItem(0)
+    #mail.To = to_field
+    #mail.Subject = "Group Email"
+    #mail.Body = "This email is sent to all recipients in the list."
+    #mail.Send()
+    #print("Email sent to all recipients!")
     
 def main() -> None:
     if not BADGES_FILE.exists():
@@ -232,6 +243,7 @@ def main() -> None:
 
     print("\n===== GPN → Email =====")
     missing_gpns: List[str] = []
+    valid_emails: List[str] = []
     
     for _, r in output_by_gpn.iterrows():
         gpn_val  = str(r[col_gpn]).strip()
@@ -242,8 +254,9 @@ def main() -> None:
             missing_gpns.append(gpn_val)
         else:
             print(f"{gpn_val}\t{name_val}\t{email}")
-            perform_action_with_email(email, gpn_val, name_val)
+            valid_emails.append(email) 
     
+    perform_action_with_emails(valid_emails)    
     print("\n")
     
     if missing_gpns:
