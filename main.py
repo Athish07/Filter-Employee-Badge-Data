@@ -2,30 +2,28 @@ import sys
 from pathlib import Path
 from typing import List, Dict
 import pandas as pd
-import win32com.client as win32
-from time import sleep
-
+import json
+import pythoncom
+from win32com.client import gencache
+from constants import ALLOWED_CYCLES, ALLOWED_STATUS, DEFAULT_COLUMNS
 
 BADGES_FILE = Path("data") / "EY Badges Tracker.xlsx"
 EMAIL_MASTER_FILE = Path("data") / "Emerging Tech Team - FY 26.xlsx"
 
-ALLOWED_STATUS = [
-    "In Progress", "Completed", "Not Started", "Submitted", "Rejected"
-]
 
-ALLOWED_CYCLES = [
-    "FY26-Q3(Jan-Mar)",
-    "FY26-Q2(Oct-Dec)",
-    "FY26-Q1(July-Sep)",
-    "FY26-Q4(Apr-Jun)",
-]
-
-DEFAULT_COLUMNS = {
-    "gpn_id": "GPN",                
-    "name": "Name",                  
-    "status": "Status",              
-    "cycle": "Completion-Cycle",
-}
+def load_email_config(path="email/email_config.json"):
+    config_path = Path(path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Email config not found: {config_path.resolve()}")
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+    
+def load_email_template(path):
+    template_path = Path(path)
+    if not template_path.exists():
+        raise FileNotFoundError(f"Email template not found: {template_path.resolve()}")
+    with open(template_path, "r", encoding="utf-8") as f:
+        return f.read()
 
 def clean_series(s: pd.Series) -> pd.Series:
     
@@ -46,8 +44,8 @@ def coalesce_columns(df: pd.DataFrame, primary: str, alternates: List[str]) -> s
     def hdr_clean(x: str) -> str:
         return (
             str(x)
-            .replace("\u00A0", " ")  # NBSP -> space
-            .replace("\u200B", "")   # zero-width
+            .replace("\u00A0", " ")  
+            .replace("\u200B", "")
             .strip()
         )
 
@@ -156,10 +154,10 @@ def build_unique_gpn(df: pd.DataFrame, col_gpn: str, col_name: str) -> pd.DataFr
 def build_gpn_to_email_map(master_path: Path) -> Dict[str, str]:
     
     dfm = load_excel_first_sheet(master_path)
-
+    
     col_gpn   = coalesce_columns(dfm, "GPN", ["GPN ID", "Gpn", "GPN_Id", "GPN Id"])
     col_email = coalesce_columns(dfm, "Email ID", ["EmailID", "Email", "Email Address", "Mail", "E-mail ID"])
-
+    
     dfm["_GPN_norm"]  = clean_series(dfm[col_gpn])
     dfm["_EMAIL_raw"] = (
         dfm[col_email].astype(str)
@@ -175,17 +173,56 @@ def build_gpn_to_email_map(master_path: Path) -> Dict[str, str]:
 
     return dict(zip(dedup["_GPN_norm"], dedup["_EMAIL_raw"]))
 
-def perform_action_with_emails(emails:List[str]) -> None:
-    pass
-    
-    # to_field = "; ".join(emails)
-    # outlook = win32.Dispatch('Outlook.Application')
-    # mail = outlook.CreateItem(0)
-    #mail.To = to_field
-    #mail.Subject = "Group Email"
-    #mail.Body = "This email is sent to all recipients in the list."
-    #mail.Send()
-    #print("Email sent to all recipients!")
+def perform_action_with_emails(
+    emails: List[str],
+    subject: str = "Group Email",
+    html_body: str = "<p>This email is sent to all recipients in the list.</p>",
+    display_before_send: bool = True
+) -> None:
+        
+    clean, seen = [], set()
+    for e in emails or []:
+        s = (e or "").strip()
+        k = s.lower()
+        if s and k not in seen:
+            seen.add(k)
+            clean.append(s)
+    if not clean:
+        print("No valid emails to send.")
+        return
+
+    pythoncom.CoInitialize()
+    outlook = gencache.EnsureDispatch("Outlook.Application")
+    session = outlook.GetNamespace("MAPI")
+
+    try:
+        session.Logon("", "", True, False)   
+    except Exception:
+        pass 
+
+    mail = outlook.CreateItem(0)  
+    mail.To = "; ".join(clean)
+
+    mail.Subject = subject
+    mail.HTMLBody = html_body 
+    try:
+        if session.Accounts.Count > 0:
+            mail.SendUsingAccount = session.Accounts.Item(1)
+    except Exception:
+        pass  
+
+    if display_before_send:
+        mail.Display(False)
+        print("Displayed email for review. If it looks correct, click Send manually.")
+        return
+
+    try:
+        mail.Send()
+        
+        print("Email sent to all recipients!")
+    except Exception as e:
+        mail.Save()
+        raise RuntimeError(f"Outlook aborted send: {repr(e)}, yo can view the email in the draft.")
     
 def main() -> None:
     if not BADGES_FILE.exists():
@@ -211,7 +248,7 @@ def main() -> None:
     if exceptions.empty:
         print("All good, there is no issue with data.")
     else:
-        print("\n===== Exceptional-Cases =====")
+        print("\n===== Exceptional-Cases =====\n")
         for _, r in exceptions[[col_gpn, "ExceptionReason"]].head(100).iterrows():
             gpn_val = "" if pd.isna(r[col_gpn]) else str(r[col_gpn]).strip()
             reason  = "" if pd.isna(r["ExceptionReason"]) else str(r["ExceptionReason"]).strip()
@@ -228,16 +265,15 @@ def main() -> None:
     filtered = apply_filters(df, col_status, col_cycle, sel_status, sel_cycle)
     
     output_by_gpn = build_unique_gpn(filtered, col_gpn, col_name)
-
+    
     print("\n===== Filtered Output (unique by GPN) =====")
     if output_by_gpn.empty:
         print("No rows matched your selections.")
         sys.exit(0)
     else:
         print(f"Unique GPNs: {len(output_by_gpn)}\n")
-        print("-" * (len(col_gpn) + 1 + len(col_name)))
         for _, row in output_by_gpn.iterrows():
-            print(f"{row[col_gpn]}\t{row[col_name]}")
+            print(f"{str(row[col_gpn]).upper()}\t{row[col_name]}")
             
     gpn_to_email = build_gpn_to_email_map(EMAIL_MASTER_FILE)
 
@@ -253,10 +289,18 @@ def main() -> None:
         if email == "":
             missing_gpns.append(gpn_val)
         else:
-            print(f"{gpn_val}\t{name_val}\t{email}")
-            valid_emails.append(email) 
+            print(f"{gpn_val.upper()}\t{name_val}\t{email}")
+            valid_emails.append(email)
+            
+    email_cfg = load_email_config()
+    html_template = load_email_template(email_cfg["template_file"])
     
-    perform_action_with_emails(valid_emails)    
+    perform_action_with_emails(
+    valid_emails,
+    subject=email_cfg["subject"],
+    html_body=html_template,
+    display_before_send=True
+    )
     print("\n")
     
     if missing_gpns:
